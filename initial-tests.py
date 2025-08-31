@@ -168,7 +168,12 @@ entropy_tracker = EntropyTracker()
 # Function to compute entropy (approximated via variance)
 def compute_entropy():
     entropy = np.zeros((GRID_SIZE, GRID_SIZE))
-    entropy[~obstacle_mask] = 0.5 * np.log(2 * np.pi * np.e * belief_variance[~obstacle_mask])
+    
+    # Adaptive minimum based on observation noise
+    min_variance = max(1e-6, OBSERVATION_NOISE**2)
+    adjusted_variance = np.maximum(belief_variance[~obstacle_mask], min_variance)
+    entropy[~obstacle_mask] = 0.5 * np.log(2 * np.pi * np.e * adjusted_variance)
+    
     return entropy
 
 # Set up interactive plotting
