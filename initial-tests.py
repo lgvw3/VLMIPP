@@ -22,7 +22,7 @@ NUM_AGENTS = 3
 START_POS = (0, 0)  # (x, y), ensured to be passable
 START_TIMES = [0, 0, 0]  # Start time for each agent
 BUDGETS = [50, 50, 50]  # Budget for each agent
-MAX_TIME = 10  # Cap at 10 steps to limit VLM calls (10 calls max)
+MAX_TIME = 20  # Cap at 20 steps to limit VLM calls (20 calls max)
 MOVE_COST = 1  # Cost per move
 OUTPUT_DIR = "simulation_outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -251,12 +251,44 @@ def get_vlm_moves(state_json, image_path):
     
     # Prompt for VLM
     prompt = f"""
-    You are coordinating agents in an exploration task. The goal is to reduce entropy (uncertainty) in the belief map by exploring high-variance areas.
-    Current state: {json.dumps(state_json)}
-    Analyze the belief map image and recommend moves for each active agent as a JSON dictionary like {{"0": "right", "1": "up", "2": "stay"}}.
-    Include no other text in your response. Ensure your follow the JSON format strictly.
-    Possible moves: stay, up, down, left, right. Avoid obstacles and respect budgets.
-    Prioritize moves that lead to high-entropy (high uncertainty) regions.
+    You are coordinating {NUM_AGENTS} robots exploring an unknown environment to reduce uncertainty in their belief map.
+
+    IMAGE INTERPRETATION:
+    - The image shows the robots' CURRENT BELIEF about rewards (not ground truth)
+    - Color scale: BLUE/PURPLE = low predicted rewards, YELLOW/GREEN = high predicted rewards
+    - BLACK areas = known obstacles (impassable)
+    - RED dots with labels (A0, A1, A2) = current robot positions
+    - Grid size: {GRID_SIZE}x{GRID_SIZE} locations
+
+    CURRENT BELIEF STATE:
+    - Time step: {state_json['time']}
+    - Total uncertainty (entropy): {state_json['total_entropy']:.4f}
+    - High-uncertainty cells: {len(state_json['high_entropy_cells'])} locations
+    - Active agents: {sum(1 for agent in state_json['agents'] if agent['active'])} robots
+
+    AGENT STATUS:
+    {chr(10).join([f"- Agent {agent['id']}: Position ({agent['pos'][0]}, {agent['pos'][1]}), Budget: {agent['budget']}, Active: {agent['active']}" for agent in state_json['agents']])}
+
+    EXPLORATION STRATEGY:
+    1. PRIORITIZE high-uncertainty regions - areas where the robots are most uncertain about rewards
+    2. Look for areas that appear YELLOW/GREEN but are far from current observations (likely high uncertainty)
+    3. Avoid BLACK areas (known obstacles)
+    4. Consider agent budgets - each move costs 1 unit
+    5. Coordinate agents to explore different high-uncertainty regions with maximum efficiency
+
+    STAY NOTES:
+
+    Stay does not reduce uncertainty. It is only used to maintain the current position in order to preserve
+    the agents budget constraints.
+
+    IMPORTANT: You are working with BELIEFS, not ground truth. Target areas of high uncertainty to improve the robots' understanding of the environment.
+
+    AVAILABLE MOVES: stay, up, down, left, right
+
+    TASK: Analyze the belief map image and recommend moves for each active agent. Return ONLY a JSON dictionary like:
+    {{"0": "right", "1": "up", "2": "stay"}}
+
+    Return ONLY the JSON response with no additional text.
     """
 
     chat = client.responses.create(
@@ -353,7 +385,7 @@ for t in range(MAX_TIME):
     }
 
     # Automate VLM call (cap at 10)
-    if vlm_call_count >= 10:
+    if vlm_call_count >= MAX_TIME:
         print("VLM call limit reached. Ending simulation.")
         break
     moves = get_vlm_moves(state, image_path)
