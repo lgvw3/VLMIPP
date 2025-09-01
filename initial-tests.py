@@ -1,19 +1,15 @@
-import time
 import numpy as np
 import matplotlib.pyplot as plt
 import json
 import os
-import base64
 from sklearn.gaussian_process import GaussianProcessRegressor 
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
 
-# from xai_sdk import Client
-# from xai_sdk.chat import user, system, image
 from dotenv import load_dotenv
-load_dotenv()
-from openai import OpenAI
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from vlm_interactions import get_vlm_response
+load_dotenv()
+
 from entropy_tracker import EntropyTracker
 
 # Parameters (configurable)
@@ -21,7 +17,7 @@ GRID_SIZE = 20
 NUM_AGENTS = 3
 START_POS = (0, 0)  # (x, y), ensured to be passable
 START_TIMES = [0, 0, 0]  # Start time for each agent
-BUDGETS = [50, 50, 50]  # Budget for each agent
+BUDGETS = [20, 20, 20]  # Budget for each agent
 MAX_TIME = 50  # Cap at 50 steps to limit VLM calls (50 calls max)
 MOVE_COST = 1  # Cost per move
 OUTPUT_DIR = "simulation_outputs"
@@ -40,6 +36,8 @@ DIRECTIONS = {
     "left": (-1, 0),
     "right": (1, 0)
 }
+
+VLM_MODE = "conversation"
 
 # Perlin noise functions
 def fade(t):
@@ -331,82 +329,6 @@ def generate_vlm_image(t, belief_variance, agents, obstacle_mask):
     plt.tight_layout()
     return fig
 
-# Function to get VLM recommendations
-def get_vlm_moves(state_json, image_path):
-    time.sleep(1)
-    # Load image as base64
-    with open(image_path, "rb") as img_file:
-        img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
-    
-    # Prompt for VLM
-    prompt = f"""
-    You are coordinating {NUM_AGENTS} robots exploring an unknown environment for INFORMATIVE PATH PLANNING.
-
-    IMAGE INTERPRETATION:
-    - The image shows the robots' CURRENT BELIEF about rewards (not ground truth)
-    - As the bots traverse the environment they will gain more information about the environment and reduce their uncertainty,
-    - The whole variance map is not updated by the robots, only that which they have observed.
-    - Use the color scale in the ledgend on the right to understand the uncertainty level of the cells.
-    - The color scale is the matplotlib cmap='hot' scale with vmin=0 and vmax=1. Meaning the lighter white / yellow colors are highly uncertain
-    - The darker reds and blacks are low uncertainty. 
-    - RED dots with labels (i.e. A0, A1, A2) = current robot positions
-    - Grid size: {GRID_SIZE}x{GRID_SIZE} locations
-
-    CURRENT BELIEF STATE:
-    - Time step: {state_json['time']}
-    - Total uncertainty (entropy): {state_json['total_entropy']:.4f}
-    - High-uncertainty cells: {len(state_json['high_entropy_cells'])} locations
-    - Active agents: {sum(1 for agent in state_json['agents'] if agent['active'])} robots
-
-    AGENT STATUS:
-    {chr(10).join([f"- Agent {agent['id']}: Position ({agent['pos'][0]}, {agent['pos'][1]}), Budget: {agent['budget']}, Active: {agent['active']}" for agent in state_json['agents']])}
-
-    COORDINATION STRATEGY:
-    1. PRIORITIZE HIGH UNCERTAINTY AREAS in the MAP
-    2. Avoid sending multiple agents to the same high-uncertainty region
-    3. Consider agent budgets and current positions
-    4. The goal is to reduce uncertainty, not find high rewards
-
-    STAY NOTES:
-
-    Stay does not reduce uncertainty. It is only used to maintain the current position in order to preserve
-    the agents budget constraints.
-
-    IMPORTANT: You are working with BELIEFS, not ground truth. Target areas of high uncertainty to improve the robots' understanding of the environment.
-
-    AVAILABLE MOVES: stay, up, down, left, right
-
-    TASK: Analyze the belief map image and recommend moves for each active agent. Return ONLY a JSON dictionary like:
-    {{"0": "right", "1": "up", "2": "stay"}}
-
-    Return ONLY the JSON response with no additional text.
-    """
-
-    chat = client.responses.create(
-        model="gpt-4.1-mini",
-        instructions="You are a helpful VLM for agent coordination.",
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    { "type": "input_text", "text": prompt },
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{img_base64}",
-                    },
-                ],
-            }
-        ],
-    )
-
-    response = chat.output_text
-    print('response', response)
-    try:
-        return json.loads(response)
-    except Exception as e:
-        print(f"VLM response error: {e}")
-        return {}
-
 # Simulation loop
 vlm_call_count = 0
 for t in range(MAX_TIME):
@@ -469,7 +391,7 @@ for t in range(MAX_TIME):
     if vlm_call_count >= MAX_TIME:
         print("VLM call limit reached. Ending simulation.")
         break
-    moves = get_vlm_moves(state, image_path)
+    moves = get_vlm_response(VLM_MODE, NUM_AGENTS, GRID_SIZE, state, image_path)
     vlm_call_count += 1
     print(f"VLM moves at step {t}: {moves}")
 
