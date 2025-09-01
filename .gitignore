@@ -11,3 +11,4 @@ __pycache__/
 *.pyzwz
 simulation_outputs/
 simulation_outputs copy/
+simulation_outputs no color in prompt/

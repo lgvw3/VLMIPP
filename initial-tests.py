@@ -72,6 +72,35 @@ def perlin(x, y, seed=0):
     x2 = lerp(n01, n11, u)
     return lerp(x1, x2, v)
 
+# Add this function after your Perlin noise functions (around line 70)
+def create_structured_uncertainty_map(grid_size, obstacle_mask):
+    """
+    Create a variance map with structured uncertainty zones that provide
+    clear coordination targets for the VLM
+    """
+    variance_map = np.zeros((grid_size, grid_size))
+    
+    # Create distinct uncertainty zones
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if obstacle_mask[j, i]:
+                variance_map[j, i] = 0.0  # Obstacles have no uncertainty for now
+            else:
+                # Zone 1: High uncertainty in top-right quadrant
+                if i > grid_size//2 and j > grid_size//2:
+                    variance_map[j, i] = 0.9
+                # Zone 2: Medium uncertainty in bottom-left quadrant  
+                elif i < grid_size//2 and j < grid_size//2:
+                    variance_map[j, i] = 0.6
+                # Zone 3: Low uncertainty in center (already "known")
+                elif grid_size//4 < i < 3*grid_size//4 and grid_size//4 < j < 3*grid_size//4:
+                    variance_map[j, i] = 0.2
+                # Default: medium uncertainty
+                else:
+                    variance_map[j, i] = 0.5
+    
+    return variance_map
+
 # Generate reward map (ground truth, not sent to VLM)
 lin_x = np.linspace(0, PERLIN_SCALE, GRID_SIZE, endpoint=False)
 lin_y = np.linspace(0, PERLIN_SCALE, GRID_SIZE, endpoint=False)
@@ -113,7 +142,8 @@ observations = []
 
 # Initialize belief maps (from GP predictions)
 belief_mean = np.zeros((GRID_SIZE, GRID_SIZE))  # Initial mean=0 (or prior)
-belief_variance = np.full((GRID_SIZE, GRID_SIZE), 1.0)  # Initial high variance
+initial_uncertainty = create_structured_uncertainty_map(GRID_SIZE, obstacle_mask)
+belief_variance = initial_uncertainty.copy()
 belief_mean[obstacle_mask] = -2.0
 belief_variance[obstacle_mask] = 0.0
 
@@ -130,10 +160,16 @@ def update_gp_and_belief():
         mean_pred, std_pred = gp.predict(grid_points, return_std=True)
         for idx, (i, j) in enumerate(grid_points):
             belief_mean[j, i] = mean_pred[idx]
-            belief_variance[j, i] = std_pred[idx]**2
+            # Only update variance for observed areas, preserve structured uncertainty elsewhere
+            if (i, j) in [(obs[0], obs[1]) for obs in observations]:
+                belief_variance[j, i] = std_pred[idx]**2
+            else:
+                # Keep the original structured uncertainty for unobserved areas
+                belief_variance[j, i] = initial_uncertainty[j, i]
     else:
         belief_mean[~obstacle_mask] = 0.0
-        belief_variance[~obstacle_mask] = 1.0
+        # Use structured uncertainty instead of uniform
+        belief_variance[~obstacle_mask] = initial_uncertainty[~obstacle_mask]
 
 # Function to observe at position (add to observations)
 def observe(pos):
@@ -281,7 +317,7 @@ def generate_vlm_image(t, belief_variance, agents, obstacle_mask):
                    color='white', fontsize=14, fontweight='bold', ha='center', va='center')
     
     # Clear title explaining what this map shows
-    ax.set_title(f"Belief Variance (Uncertainty) - Step {t}\nRED = High Uncertainty (Explore Here!)", 
+    ax.set_title(f"Belief Variance (Uncertainty) - Step {t}", 
                 fontsize=14, fontweight='bold')
     ax.set_xlabel("X Coordinate")
     ax.set_ylabel("Y Coordinate")
@@ -297,7 +333,7 @@ def generate_vlm_image(t, belief_variance, agents, obstacle_mask):
 
 # Function to get VLM recommendations
 def get_vlm_moves(state_json, image_path):
-    time.sleep(2)
+    time.sleep(1)
     # Load image as base64
     with open(image_path, "rb") as img_file:
         img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
@@ -308,9 +344,12 @@ def get_vlm_moves(state_json, image_path):
 
     IMAGE INTERPRETATION:
     - The image shows the robots' CURRENT BELIEF about rewards (not ground truth)
-    - Color scale: BLUE/PURPLE = low predicted rewards, YELLOW/GREEN = high predicted rewards
-    - BLACK areas = known obstacles (impassable)
-    - RED dots with labels (A0, A1, A2) = current robot positions
+    - As the bots traverse the environment they will gain more information about the environment and reduce their uncertainty,
+    - The whole variance map is not updated by the robots, only that which they have observed.
+    - Use the color scale in the ledgend on the right to understand the uncertainty level of the cells.
+    - The color scale is the matplotlib cmap='hot' scale with vmin=0 and vmax=1. Meaning the lighter white / yellow colors are highly uncertain
+    - The darker reds and blacks are low uncertainty. 
+    - RED dots with labels (i.e. A0, A1, A2) = current robot positions
     - Grid size: {GRID_SIZE}x{GRID_SIZE} locations
 
     CURRENT BELIEF STATE:
@@ -322,12 +361,8 @@ def get_vlm_moves(state_json, image_path):
     AGENT STATUS:
     {chr(10).join([f"- Agent {agent['id']}: Position ({agent['pos'][0]}, {agent['pos'][1]}), Budget: {agent['budget']}, Active: {agent['active']}" for agent in state_json['agents']])}
 
-    RIGHT MAP (Belief Variance): Where we're most uncertain - THIS IS YOUR TARGET!
-    - BLUE = low uncertainty (we know this area well)
-    - RED = high uncertainty (we need to explore here!)
-
     COORDINATION STRATEGY:
-    1. PRIORITIZE RED AREAS in the MAP (high uncertainty)
+    1. PRIORITIZE HIGH UNCERTAINTY AREAS in the MAP
     2. Avoid sending multiple agents to the same high-uncertainty region
     3. Consider agent budgets and current positions
     4. The goal is to reduce uncertainty, not find high rewards
