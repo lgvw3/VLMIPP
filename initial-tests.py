@@ -242,6 +242,59 @@ def update_plots(t):
     fig.canvas.draw()
     fig.canvas.flush_events()
 
+def generate_vlm_image(t, belief_variance, agents, obstacle_mask):
+    """
+    Generate VLM image showing ONLY the belief variance (uncertainty) map
+    This is what the VLM actually needs to make orchestration decisions
+    """
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # Create a copy of variance for visualization (to avoid modifying the original)
+    viz_variance = belief_variance.copy()
+    
+    # Set obstacle areas to a special value for visualization
+    viz_variance[obstacle_mask] = -1
+    
+    # Show belief variance (uncertainty) with fixed range
+    im = ax.imshow(viz_variance, cmap='hot', origin='lower', 
+                   extent=[0, GRID_SIZE, 0, GRID_SIZE], vmin=0, vmax=1)
+    
+    # Overlay obstacles with a different approach
+    # Create a binary mask for obstacles and overlay it
+    obstacle_overlay = np.ma.masked_where(~obstacle_mask, np.ones_like(obstacle_mask))
+    ax.imshow(obstacle_overlay, cmap='gray', alpha=0.8, origin='lower', 
+              extent=[0, GRID_SIZE, 0, GRID_SIZE])
+    
+    # Add grid for better spatial understanding
+    ax.grid(True, alpha=0.3)
+    ax.set_xticks(np.arange(0, GRID_SIZE + 1, 5))
+    ax.set_yticks(np.arange(0, GRID_SIZE + 1, 5))
+    
+    # Plot agents with clear visibility
+    for agent in agents:
+        if agent["active"]:
+            # Large, clear agent markers
+            ax.plot(agent["pos"][0] + 0.5, agent["pos"][1] + 0.5, 'o', 
+                   markersize=20, color='red', markeredgecolor='white', markeredgewidth=3)
+            # Clear agent labels
+            ax.text(agent["pos"][0] + 0.5, agent["pos"][1] + 0.5, f'A{agent["id"]}', 
+                   color='white', fontsize=14, fontweight='bold', ha='center', va='center')
+    
+    # Clear title explaining what this map shows
+    ax.set_title(f"Belief Variance (Uncertainty) - Step {t}\nRED = High Uncertainty (Explore Here!)", 
+                fontsize=14, fontweight='bold')
+    ax.set_xlabel("X Coordinate")
+    ax.set_ylabel("Y Coordinate")
+    
+    # Add colorbar with clear labels
+    cbar = plt.colorbar(im, ax=ax, orientation='vertical', fraction=0.02, pad=0.04)
+    cbar.set_label('Uncertainty Level', fontweight='bold')
+    cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+    cbar.set_ticklabels(['Low', 'Low-Med', 'Medium', 'Med-High', 'High'])
+    
+    plt.tight_layout()
+    return fig
+
 # Function to get VLM recommendations
 def get_vlm_moves(state_json, image_path):
     time.sleep(2)
@@ -251,7 +304,7 @@ def get_vlm_moves(state_json, image_path):
     
     # Prompt for VLM
     prompt = f"""
-    You are coordinating {NUM_AGENTS} robots exploring an unknown environment to reduce uncertainty in their belief map.
+    You are coordinating {NUM_AGENTS} robots exploring an unknown environment for INFORMATIVE PATH PLANNING.
 
     IMAGE INTERPRETATION:
     - The image shows the robots' CURRENT BELIEF about rewards (not ground truth)
@@ -269,12 +322,15 @@ def get_vlm_moves(state_json, image_path):
     AGENT STATUS:
     {chr(10).join([f"- Agent {agent['id']}: Position ({agent['pos'][0]}, {agent['pos'][1]}), Budget: {agent['budget']}, Active: {agent['active']}" for agent in state_json['agents']])}
 
-    EXPLORATION STRATEGY:
-    1. PRIORITIZE high-uncertainty regions - areas where the robots are most uncertain about rewards
-    2. Look for areas that appear YELLOW/GREEN but are far from current observations (likely high uncertainty)
-    3. Avoid BLACK areas (known obstacles)
-    4. Consider agent budgets - each move costs 1 unit
-    5. Coordinate agents to explore different high-uncertainty regions with maximum efficiency
+    RIGHT MAP (Belief Variance): Where we're most uncertain - THIS IS YOUR TARGET!
+    - BLUE = low uncertainty (we know this area well)
+    - RED = high uncertainty (we need to explore here!)
+
+    COORDINATION STRATEGY:
+    1. PRIORITIZE RED AREAS in the MAP (high uncertainty)
+    2. Avoid sending multiple agents to the same high-uncertainty region
+    3. Consider agent budgets and current positions
+    4. The goal is to reduce uncertainty, not find high rewards
 
     STAY NOTES:
 
@@ -350,20 +406,10 @@ for t in range(MAX_TIME):
         print(f"Step {t}: Total entropy = {total_entropy:.4f}")
 
     # Generate visualization of belief mean (for VLM input)
-    fig_belief, ax_belief = plt.subplots(figsize=(8, 8))
-    ax_belief.imshow(belief_mean, cmap='viridis', origin='lower', extent=[0, GRID_SIZE, 0, GRID_SIZE], vmin=-2, vmax=1)
-    ax_belief.imshow(obstacle_mask, cmap='binary', alpha=0.5, origin='lower', extent=[0, GRID_SIZE, 0, GRID_SIZE])
-    for agent in agents:
-        if agent["active"]:
-            ax_belief.plot(agent["pos"][0], agent["pos"][1], 'ro', markersize=10)
-            ax_belief.text(agent["pos"][0] + 0.1, agent["pos"][1] + 0.1, f'A{agent["id"]}', color='white')
-    ax_belief.set_title(f"Belief Mean - Time Step: {t}")
-    ax_belief.set_xlabel("X")
-    ax_belief.set_ylabel("Y")
-    ax_belief.grid(True)
+    fig = generate_vlm_image(t, belief_variance, agents, obstacle_mask)
     image_path = os.path.join(OUTPUT_DIR, f"belief_state_{t}.png")
     plt.savefig(image_path)
-    plt.close(fig_belief)
+    plt.close(fig)
 
     # Generate JSON state (for VLM input)
     state = {

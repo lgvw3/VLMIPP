@@ -10,3 +10,4 @@ __pycache__/
 *.pyzw
 *.pyzwz
 simulation_outputs/
+simulation_outputs copy/
